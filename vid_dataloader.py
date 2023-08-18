@@ -41,7 +41,7 @@ class LFDataLoader(object):
                 args.batchsize,
                 shuffle=args.visualization_shuffle,
                 num_workers=1,
-                pin_memory=False,
+                pin_memory=True,
                 sampler=self.eval_sampler,
             )
 
@@ -55,7 +55,7 @@ class LFDataLoader(object):
                 args.batchsize,
                 shuffle=args.visualization_shuffle,
                 num_workers=1,
-                pin_memory=False,
+                pin_memory=True,
                 sampler=self.eval_sampler,
             )
 
