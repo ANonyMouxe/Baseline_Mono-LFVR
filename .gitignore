@@ -1,0 +1,7 @@
+__pycache__/
+*.pt
+*.pth
+*.mp4
+*.npy
+test_inputs/
+weights/
