@@ -94,7 +94,7 @@ class Tester():
         ###############################################################################################
         if not self.no_refinement:
             self.ref_model.eval()
-            
+
         self.lf_model.eval()
 
         ################################# Validation loop #############################################
@@ -118,9 +118,9 @@ class Tester():
                     ssims_2 = []
 
                     for id in range(1, video_length-1):
-                        curr_img = batch[id]['rgb']['orig'].to(self.device)
-                        prev_img = batch[id-1]['rgb']['orig'].to(self.device)
-                        next_img = batch[id+1]['rgb']['orig'].to(self.device)
+                        curr_img = batch[id]['rgb'].to(self.device)
+                        prev_img = batch[id-1]['rgb'].to(self.device)
+                        next_img = batch[id+1]['rgb'].to(self.device)
 
                         orig_curr_img = denormalize(curr_img, self.device)
                         orig_imgs.append(orig_curr_img.cpu())

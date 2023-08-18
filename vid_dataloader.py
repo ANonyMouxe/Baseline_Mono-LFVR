@@ -11,15 +11,16 @@ import pandas as pd
 import cv2
 import glob
 
-def preprocessing_transforms(mode):
-    return transforms.Compose([ProcessAndToTensor(mode=mode)])
+def preprocessing_transforms(mode, size):
+    return transforms.Compose([ToTensor(mode=mode, size=size)])
 
 
 class LFDataLoader(object):
     def __init__(self, args, mode):
         if mode == "train":
+            size = (args.train_height, args.train_width)
             self.training_samples = DPDataset(
-                args, mode, transform=preprocessing_transforms(mode)
+                args, mode, transform=preprocessing_transforms(mode, size)
             )
             self.train_sampler = None
             self.data = DataLoader(
@@ -32,8 +33,9 @@ class LFDataLoader(object):
             )
 
         elif mode == "eval":
+            size = (args.val_height, args.val_width)
             self.testing_samples = DPDataset(
-                args, mode, transform=preprocessing_transforms(mode)
+                args, mode, transform=preprocessing_transforms(mode, size)
             )
             self.eval_sampler = None
             self.data = DataLoader(
@@ -46,8 +48,9 @@ class LFDataLoader(object):
             )
 
         elif mode == 'test':
+            size = (args.val_height, args.val_width)
             self.testing_samples = DPDataset(
-                args, mode, transform=preprocessing_transforms(mode)
+                args, mode, transform=preprocessing_transforms(mode, size)
             )
             self.eval_sampler = None
             self.data = DataLoader(
@@ -125,7 +128,7 @@ class DPDataset(Dataset):
         for frame in video["frames"]:
             frame_data = {}
             # times['initial'].append(datetime.now().timestamp())
-            orig_rgb_frame = Image.open(
+            orig_rgb_frame = np.array(Image.open(
                 os.path.join(
                     self.datapath,
                     "B",
@@ -133,11 +136,7 @@ class DPDataset(Dataset):
                     video["name"],
                     frame["rgb"]["B"],
                 )
-            )
-            
-            
-            orig_rgb_frame = orig_rgb_frame.resize((self.width, self.height))
-            orig_rgb_frame = np.asarray(orig_rgb_frame, dtype=np.float32) / 255.0
+            ).resize((self.width, self.height)), dtype=np.float32) / 255.
 
             # times['rgb'].append(datetime.now().timestamp())
             
@@ -149,9 +148,8 @@ class DPDataset(Dataset):
                     video["name"],
                     frame["left_dp"]["B"],
                 )
-            )
-            left_dp = left_dp.resize((self.width, self.height))
-            left_dp = np.asarray(left_dp, dtype=np.float32)[:,:,0:1] / 255.0 # Extract only one channel as image is grayscale
+            ).resize((self.width, self.height))
+            left_dp = np.array(left_dp, dtype=np.float32)[:,:,0:1] / 255.0 # Extract only one channel as image is grayscale
 
             right_dp = Image.open(
                 os.path.join(
@@ -161,9 +159,8 @@ class DPDataset(Dataset):
                     video["name"],
                     frame["right_dp"]["B"],
                 )
-            )
-            right_dp = right_dp.resize((self.width, self.height))
-            right_dp = np.asarray(right_dp, dtype=np.float32) [:,:,0:1]/ 255.0
+            ).resize((self.width, self.height))
+            right_dp = np.array(right_dp, dtype=np.float32) [:,:,0:1]/ 255.0
             
             # times['dp'].append(datetime.now().timestamp())
 
@@ -183,7 +180,7 @@ class DPDataset(Dataset):
 
             # times['dpt'].append(datetime.now().timestamp())
             
-            frame_data["rgb"] = {"orig": orig_rgb_frame, "transformed": orig_rgb_frame}
+            frame_data["rgb"] = orig_rgb_frame
             frame_data["left_dp"] = left_dp
             frame_data["right_dp"] = right_dp
             frame_data["disp"] = disp
@@ -202,50 +199,54 @@ class DPDataset(Dataset):
         return video_data
 
 
-class ProcessAndToTensor(object):
-    def __init__(self, mode):
+class ToTensor(object):
+    def __init__(self, mode, size):
         self.mode = mode
-        self.normalize_rgb = transforms.Normalize(
-            mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
-        )
-        self.normalize_dp = transforms.Normalize(mean=[0.456], std=[0.224])
+        self.H, self.W = size
+        self.normalize_3d = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        self.normalize_1d = transforms.Normalize(mean=[0.456], std=[0.224])
+        # self.transform = transforms.Resize(size)
 
-    def __call__(self, frame):
-        rgb = frame["rgb"]["transformed"]
-        rgb = self.to_tensor(rgb)
-        rgb = self.normalize_rgb(rgb)
-                
+
+    def __call__(self, sample):
+        trans_sample = {}
+        for key in ['rgb']:#, 'left_stereo', 'right_stereo']:
+            image = sample[key]
+            image = self.to_tensor(image)
+            # image = self.transform(image)
+            image = self.normalize_3d(image)
+            trans_sample[key] = image
         
-        orig_rgb = frame["rgb"]["orig"]
-        orig_rgb = self.to_tensor(orig_rgb)
+        for key in ['left_dp', 'right_dp']:
+            image = sample[key]
+            image = self.to_tensor(image)
+            # image = self.transform(image)
+            image = self.normalize_1d(image)
+            trans_sample[key] = image
 
-        left_dp = frame["left_dp"]
-        left_dp = self.to_tensor(left_dp)
-        left_dp = self.normalize_dp(left_dp)
+        for key in ['disp']:#['left_disp', 'right_disp']:
+            image = sample[key]
+            #print(image.max(), image.min())
+            image = self.to_tensor(image)
+            #_, H, W = image.shape
+            #image = image * self.W / W
+            # image = self.transform(image)
+            trans_sample[key] = image
 
-        right_dp = frame["right_dp"]
-        right_dp = self.to_tensor(right_dp)
-        right_dp = self.normalize_dp(right_dp)
 
-        disp = frame["disp"]
-        disp = self.to_tensor(disp)
-        
-        rgb_with_dp = torch.cat([rgb, left_dp, right_dp], dim=0)
+        return trans_sample
 
-        frame_data = {
-            "rgb": {"orig": orig_rgb},
-            "rgb_with_dp": rgb_with_dp,
-            "disp": disp,
-        }
-        return frame_data
 
     def to_tensor(self, pic):
         image = torch.FloatTensor(pic)
         shape = image.shape
-        
         if len(shape) == 3:
-            image = rearrange(image, "h w c -> c h w")  
-            return image
+            image = image.permute(2, 0, 1)
+        elif len(shape) == 4:
+            image = image.permute(0, 3, 1, 2)
+
+        return image
+
 
 
 if __name__ == "__main__":
