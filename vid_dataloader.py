@@ -11,12 +11,17 @@ import pandas as pd
 import cv2
 import glob
 
+
 def preprocessing_transforms(mode, size):
     return transforms.Compose([ToTensor(mode=mode, size=size)])
 
 
+def preprocessing_transforms2(mode, size, get_type='resize'):
+    return transforms.Compose([ToTensor2(mode=mode, size=size, get_type=get_type)])
+
+
 class LFDataLoader(object):
-    def __init__(self, args, mode):
+    def __init__(self, args, mode, calcMetrics=False):
         if mode == "train":
             size = (args.train_height, args.train_width)
             self.training_samples = DPDataset(
@@ -49,22 +54,109 @@ class LFDataLoader(object):
 
         elif mode == 'test':
             size = (args.val_height, args.val_width)
-            self.testing_samples = DPDataset(
-                args, mode, transform=preprocessing_transforms(mode, size)
-            )
-            self.eval_sampler = None
-            self.data = DataLoader(
-                self.testing_samples,
-                args.batchsize,
-                shuffle=args.visualization_shuffle,
-                num_workers=1,
-                pin_memory=True,
-                sampler=self.eval_sampler,
-            )
+            if calcMetrics:
+                self.testing_samples = DataLoadPreprocess(args, mode, 
+                                                          transform=preprocessing_transforms2(mode, size))
+                self.data = DataLoader(self.testing_samples, args.batchsize,
+                               shuffle=False, num_workers=1,
+                               pin_memory=True, sampler=None)
+            else:
+                self.testing_samples = DPDataset(args, mode, transform=preprocessing_transforms(mode, size))
+                self.eval_sampler = None
+
+                self.data = DataLoader(
+                    self.testing_samples,
+                    args.batchsize,
+                    shuffle=args.visualization_shuffle,
+                    num_workers=1,
+                    pin_memory=True,
+                    sampler=self.eval_sampler,
+                )
 
         else:
             print("mode should be one of 'train or eval or test'. Got {}".format(mode))
 
+
+class DataLoadPreprocess(Dataset):
+    def __init__(self, args, mode, transform=None, is_for_online_eval=False):
+        self.args = args
+        if mode == 'test':
+            with open(args.filenames_file_eval, 'r') as f:
+                self.filenames = f.readlines()
+        else:
+            with open(args.filenames_file, 'r') as f:
+                self.filenames = f.readlines()
+
+        self.type = args.type
+        self.genDP_path = args.genDP_path
+        self.mode = mode
+        self.transform = transform
+        self.color_corr = args.color_corr
+        self.width = args.val_width
+        self.height = args.val_height
+
+
+    def __getitem__(self, idx):
+        sample_path = self.filenames[idx]
+        paths = sample_path.split('\t')[:-1]
+        sample = {}
+
+        for i, path in enumerate(paths):
+            lf_num = path.split('/')[-1].split('-')[1].split('.')[0]
+            lf_path = os.path.join(self.args.lf_path, path)
+            lf = np.load(lf_path) / 255.0
+            if lf.shape[4] == 3:
+                lf = lf.transpose([0, 1, 4, 2, 3])
+            else:
+                lf = lf.transpose([1, 0, 2, 3, 4])
+
+            if self.color_corr:
+                mean = lf.mean()
+                fact = np.log(0.4) / np.log(mean)
+                if fact<1:
+                    lf = lf ** fact
+
+            X, Y, C, H, W = lf.shape
+            image = lf[X//2, Y//2, ...] # Center view
+            # print("image.shape: ", image.shape)
+            lf = lf.reshape(X*Y, C, H, W)
+            
+            disp_path = os.path.join(self.args.otherDS_disp_path, 
+                                     self.args.dataset, 
+                                     "test_dp",  # change to test/train for DPT depth | test_dp for unimatch
+                                     f"left_lf-{lf_num}_disp.png") # change to lf-{lf_num}.png for DPT depth | for unimatch: left_lf-{lf_num}_disp.png
+            disp = cv2.imread(disp_path, cv2.IMREAD_ANYDEPTH)
+            disp = cv2.resize(disp, (self.width, self.height), interpolation=cv2.INTER_CUBIC) / 255.
+            disp = np.expand_dims(disp, axis=0)
+            
+            left_dp = Image.open(
+                os.path.join(self.genDP_path, f"left_lf-{lf_num}.png")
+                ).resize((self.width, self.height))
+            left_dp = np.array(left_dp, dtype=np.float32) / 255.0 
+            left_dp = np.expand_dims(left_dp, axis=0)
+            # print(f"[!] Left_dp.shape: {left_dp.shape} | {np.amax(left_dp)} | {np.amin(left_dp)}")
+
+            right_dp = Image.open(
+                os.path.join(self.genDP_path, f"right_lf-{lf_num}.png")
+                ).resize((self.width, self.height))
+            right_dp = np.array(right_dp, dtype=np.float32) / 255.0
+            right_dp = np.expand_dims(right_dp, axis=0)
+            
+            sample[i] = {'rgb': image, 
+                         'lf': lf,
+                         'disp': disp, 
+                        'left_dp': left_dp, 
+                        'right_dp': right_dp}
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+    def __len__(self):
+        return len(self.filenames)
+    
 
 class DPDataset(Dataset):
     """
@@ -210,6 +302,7 @@ class ToTensor(object):
 
     def __call__(self, sample):
         trans_sample = {}
+        # print(sample)
         for key in ['rgb']:#, 'left_stereo', 'right_stereo']:
             image = sample[key]
             image = self.to_tensor(image)
@@ -233,7 +326,6 @@ class ToTensor(object):
             # image = self.transform(image)
             trans_sample[key] = image
 
-
         return trans_sample
 
 
@@ -247,6 +339,65 @@ class ToTensor(object):
 
         return image
 
+
+class ToTensor2(object):
+    def __init__(self, mode, size, get_type):
+        self.mode = mode
+        self.normalize_3d = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        self.normalize_1d = transforms.Normalize(mean=[0.456], std=[0.224])
+        self.transform = transforms.Resize(size)
+        self.type = get_type
+
+
+    def to_tensor(self, pic):
+        image = torch.FloatTensor(pic)
+        
+        shape = image.shape
+        if len(shape) == 3 and shape[-1] == 3:
+            image = image.permute(2, 0, 1)
+        elif len(shape) == 4 and shape[-1] == 3:
+            image = image.permute(0, 3, 1, 2)
+        
+        return image
+
+
+    def __call__(self, sample):
+        for i in sample.keys():
+            image = sample[i]['rgb']
+            image = self.to_tensor(image)
+            if self.type == 'resize':
+                image = self.transform(image)
+            image = self.normalize_3d(image)
+
+            lf = sample[i]['lf']
+            lf = self.to_tensor(lf)
+            if self.type == 'resize':
+                lf = self.transform(lf)
+            
+            # print("In ToTensor2: ")
+            left_dp = sample[i]['left_dp']
+            left_dp = self.to_tensor(left_dp)
+            if self.type == 'resize':
+                left_dp = self.transform(left_dp)
+            left_dp = self.normalize_1d(left_dp)
+
+
+            right_dp = sample[i]['right_dp']
+            right_dp = self.to_tensor(right_dp)
+            if self.type == 'resize':
+                right_dp = self.transform(right_dp)
+            right_dp = self.normalize_1d(right_dp)
+
+            disp = sample[i]['disp']
+            disp = self.to_tensor(disp)
+            if self.type == 'resize':
+                disp = self.transform(disp)
+
+            sample[i] = {'rgb': image, 'lf': lf, 'disp': disp, 'left_dp': left_dp, 'right_dp': right_dp}
+
+            # sample[i] = {'rgb': image, 'lf': lf, 'left_dp': left_dp, 'right_dp': right_dp}
+            
+        return sample
 
 
 if __name__ == "__main__":

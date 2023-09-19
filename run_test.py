@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import argparse
 import os
 import sys
@@ -10,6 +11,7 @@ import math
 import imageio
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -50,13 +52,13 @@ class Tester():
         ####################################### LF Model ##############################################
         # number of predictions for TD
         td_chans = self.args.rank*self.args.num_layers*3
-        self.lf_model = models.UnetLF.build(td_chans=td_chans, layers=args.num_layers, rank=args.rank)
-        self.lf_model.encoder.original_model.conv_stem = models.Conv2dSame(10, 48, kernel_size=(3, 3), 
+        self.model = models.UnetLF.build(td_chans=td_chans, layers=args.num_layers, rank=args.rank)
+        self.model.encoder.original_model.conv_stem = models.Conv2dSame(10, 48, kernel_size=(3, 3), 
                                                                            stride=(2, 2), bias=False)
         checkpoint = torch.load('weights/eccv_recons_net.pt', map_location='cpu')['model']
-        self.lf_model.load_state_dict(checkpoint)
+        self.model.load_state_dict(checkpoint)
         # print(self.lf_model)
-        self.lf_model = self.lf_model.to(self.device1)
+        self.model = self.model.to(self.device1)
 
         ##################################### Tensor Display ##########################################
         self.val_td_model = models.multilayer(height=args.val_height, width=args.val_width, 
@@ -65,12 +67,13 @@ class Tester():
         self.zp = args.zero_plane
 
         ####################################### Save test results ##############################################
-        self.save_path = os.path.join(args.results, args.dataset+'-{:.2f}, {:.2f}'.format(self.md, self.zp))
+        self.save_path = os.path.join(args.results, "Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
         os.makedirs(self.save_path, exist_ok=True)
         self.save_numpy = args.save_numpy
 
 
     def calculate_psnr(self, img1, img2):
+        # print(img1.shape, img2.shape)
         with torch.no_grad():
             img1 = 255*img1#.cpu()
             img2 = 255*img2#.cpu()
@@ -90,90 +93,81 @@ class Tester():
             return loss
 
 
-    def test(self, test_loader, md, zp):
+    def test(self, test_loader, max_disp, zero_plane):
         ###############################################################################################
-        if not self.no_refinement:
-            self.ref_model.eval()
+        # some globals
+        iters = len(test_loader)
+        # interpolate = nn.Upsample(size=(1080, 720), mode='bilinear')
+        if self.args.calcMetrics:
+            psnr_avg_1 = RunningAverage()
+            ssim_avg_1 = RunningAverage()
+            f = open(os.path.join(self.save_path, f'results.txt'), 'w')
 
-        self.lf_model.eval()
-
-        ################################# Validation loop #############################################
         with torch.no_grad():
-            with tqdm(enumerate(test_loader), total=len(test_loader), 
-                      desc='Testing-{}_{:.2f},{:.2f}'.format(self.args.dataset, md, zp)) as vepoch:
+            with tqdm(enumerate(test_loader), total=len(test_loader), desc=f"Testing {self.args.dataset}") as vepoch:
                 for i, batch in vepoch:
-                    prev_state = None
+                    # print(i, batch.keys()) 
                     video_length = len(batch)
-                    pred_lfs = []
-                    if not self.no_refinement:
-                        ref_lfs = []
-                    # gt_lfs = []
-                    orig_imgs = []
-                    diff_lfs = []
-                    masks = []
+                    prev_state = None
 
-                    psnrs_1 = []
-                    ssims_1 = []
-                    psnrs_2 = []
-                    ssims_2 = []
+                    # pred_lfs = []
+                    # orig_imgs = []
+                    
+                    if self.args.calcMetrics:
+                        # ids = sorted(batch.keys())
+                        # leng = len(ids) - 1
+                        gt_lfs = []
+                        psnrs_1 = []
+                        ssims_1 = []
+                        curr_img = batch[1]['rgb'].to(self.device)
+                        prev_img = batch[0]['rgb'].to(self.device)
+                        next_img = batch[2]['rgb'].to(self.device)
+                        # NOTE: prev and next will be used for video input methods
+                        curr_orig_image = batch[1]['rgb']
+                        # orig_imgs.append(denormalize3d(curr_orig_image).cpu())
+                        # prev_orig_image = batch[id-1]['rgb']
+                        # next_orig_image = batch[id+1]['rgb']
+                        unimatch_disp =  batch[1]['disp'].to(self.device)
+                        disp = -1 * (unimatch_disp - zero_plane) * max_disp
+                        # print(disp.shape)
+                        img = torch.cat([prev_img, curr_img, next_img, disp], dim=1) 
+    
+                        decomposition, depth_planes, state = self.model(img, prev_state)
+                        pred_lf = self.val_td_model(decomposition, depth_planes).cpu()
+                        pred_lf.clip(0, 1)
+                        # pred_lfs.append(pred_lf)
+                        if self.args.calcMetrics:
+                            # print(f"calculating metrics for {id}th image")
+                            gt_lf = batch[1]['lf'].cpu()
+                            # gt_lfs.append(gt_lf)
+                            pred_psnr_1 = self.calculate_psnr(pred_lf, gt_lf)
+                            pred_ssim_1 = self.calculate_ssim(pred_lf, gt_lf)
+                            # print("psnr, ssim :: ", pred_psnr_1, pred_ssim_1)
+                            psnr_avg_1.append(pred_psnr_1)
+                            ssim_avg_1.append(pred_ssim_1)
+                            psnrs_1.append(pred_psnr_1) # running avg
+                            ssims_1.append(pred_ssim_1)
+                    
+                        avg_psnr_1 = sum(psnrs_1)/len(psnrs_1)
+                        avg_ssim_1 = sum(ssims_1)/len(ssims_1)
+                        string = 'Sample {0:2d} => PSNR: {1:.4f}, SSIM: {2:.4f}\n'.format(i, avg_psnr_1, avg_ssim_1)
+                        f.write(string)
+                        vepoch.set_postfix(psnr_iA=f"{psnr_avg_1.get_value():0.2f}({avg_psnr_1:0.2f})",
+                                       ssim_iA=f"{ssim_avg_1.get_value():0.2f}({avg_ssim_1:0.2f})")
 
-                    for id in range(1, video_length-1):
-                        curr_img = batch[id]['rgb'].to(self.device)
-                        prev_img = batch[id-1]['rgb'].to(self.device)
-                        next_img = batch[id+1]['rgb'].to(self.device)
+                if self.args.calcMetrics:
+                    pred_avg_psnr = psnr_avg_1.get_value()
+                    pred_avg_ssim = ssim_avg_1.get_value()
+                    string = '\n\n---------\nAverage PSNR: {0:.4f}\nAverage SSIM: {1:.4f}\n---------'.format(pred_avg_psnr, pred_avg_ssim)
+                    f.write(string)
+                    f.close()
 
-                        orig_curr_img = denormalize(curr_img, self.device)
-                        orig_imgs.append(orig_curr_img.cpu())
-
-                        # gt_lf = batch[id]['lf'].to(self.device)
-                        # gt_lfs.append(gt_lf)
-                        dpt_disp = batch[id]['disp'].to(self.device)
-                        disp = -1 * (dpt_disp - zp) * md
-                        img = torch.cat([prev_img, curr_img, next_img, disp], dim=1)
-
-                        img = img.to(self.device1)
-                        decomposition, depth_planes, state = self.lf_model(img, prev_state)
-                        pred_lf = self.val_td_model(decomposition, depth_planes)
-                        pred_lf = pred_lf.clip(0, 1)
-                        pred_lfs.append(pred_lf.cpu())
-
-                        if not self.no_refinement:
-                            curr_img = curr_img.to(self.device)
-                            pred_lf = pred_lf.to(self.device)
-
-                            lf_inp = torch.cat([pred_lf, curr_img.unsqueeze(1)], dim=1)
-                            mask, corr_lf = self.ref_model(lf_inp)
-                            ref_lf = mask*corr_lf + (1-mask)*pred_lf
-                            ref_lf = ref_lf.clip(0, 1)
-                            ref_lfs.append(ref_lf.cpu())
-
-                            mask = mask.repeat(1, 1, 3, 1, 1)
-                            masks.append(3*mask.cpu())
-                            ref_lf_imgs = utils.lftensor2lfnp(ref_lfs)
-                            for lf, path in zip(ref_lf_imgs, ref_lf_paths):
-                                utils.save_video_from_lf(lf, path)
-                                if self.save_numpy:
-                                    np.save(path.replace('mp4', 'npy'), lf)
-
-                        _, pred_lf_paths, ref_lf_paths, img_paths = utils.get_paths(self.save_path, i, len(pred_lfs))
-                        inp_imgs = utils.imtensor2imnp(orig_imgs)
-                        # gt_imgs = utils.lftensor2lfnp(gt_lfs)
-                        pred_lf_imgs = utils.lftensor2lfnp(pred_lfs)
-                        
-                        for img, path in zip(inp_imgs, img_paths):
-                            imageio.imwrite(path, np.uint8(img*255))
-             
-                        for lf, path in zip(pred_lf_imgs, pred_lf_paths):
-                            utils.save_video_from_lf(lf, path)
-                            if self.save_numpy:
-                                np.save(path.replace('mp4', 'npy'), lf)
-                        
-                        prev_state = state
                         
 
     def main_worker(self):        
         ###############################################################################################
-        test_loader = LFDataLoader(self.args, 'test').data
+        test_loader = LFDataLoader(self.args, mode='test', calcMetrics=self.args.calcMetrics).data
+        # print("test_loader sample:", next(iter(test_loader))[0]['disp'].shape)
         zp, md = self.zp, self.md
         self.test(test_loader, md, zp)
 
@@ -196,15 +190,28 @@ if __name__ == '__main__':
     ####################################### Experiment arguments ######################################
     parser.add_argument('--results', default='results', type=str, help='directory to save results')
     parser.add_argument('-sn', '--save_numpy', default=False, action='store_true', help='whether to save np files')
+    parser.add_argument('--mode', default='test', type=str, help='train or test')
+
+    parser.add_argument('--dataset', default='TAMULF', type=str, help='Dataset to test on')
+    parser.add_argument('--filenames_file_eval', default='./FT_train-test_files/TAMULF/test_files.txt',
+                        type=str, help='path to the filenames text file for online evaluation')
+    parser.add_argument('--calcMetrics', help='if set, calculates metrics', action='store_true', default=True)
+    parser.add_argument('--lf_path', default='/data/prasan/datasets/LF_datasets/', type=str, help='path to light field dataset')
+    parser.add_argument('-ty', '--type', type=str, default='resize', 
+                        help='whether to train with crops or resized images')
+    parser.add_argument('--genDP_path', default='/data2/aryan/TAMULF/test_dp/', type=str, help='path to generated dual pixels') 
+    
+    # Change to DPT depth maps: /data/prasan/datasets/LF_datasets/DPT-depth/ | /data2/aryan/unimatch/dp_otherDS/
+    parser.add_argument('--otherDS_disp_path', default='/data2/aryan/unimatch/dp_otherDS/', type=str, help='path to other datasets disparity maps')
+
     
     parser.add_argument('--gpu_1', default=0, type=int, help='which gpu to use')
     parser.add_argument('--gpu_2', default=0, type=int, help='which gpu to use')
     parser.add_argument('--workers', default=1, type=int, help='number of workers for data loading')
 
     ######################################## Dataset parameters #######################################
-    parser.add_argument('--dataset', default='Pixel4_IITM', type=str, help='Dataset to train on')
 
-    parser.add_argument('--datapath', default='/data2/raghav/datasets/Pixel4_3DP/rectified', type=str,
+    parser.add_argument('--datapath', default='/data/prasan/datasets/LF_datasets/', type=str,
                         help='path to dataset')
     parser.add_argument('--unrect_datapath', default='/data2/raghav/datasets/Pixel4_3DP/unrectified', type=str,
                         help='path to dataset')
@@ -217,7 +224,7 @@ if __name__ == '__main__':
     # -----------------------------------------------------------------------------------
 
     parser.add_argument('--filenames_file_folder',
-                        default='/data2/aryan/mono-eccv/test_inputs/Pixel4_3DP_skip10',
+                        default='/data2/aryan/mono-eccv/FT_train-test_files/TAMULF/',
                         type=str, help='path to the folder containing filenames to use')
 
     parser.add_argument('--visualization_shuffle', default=False, action='store_true', help='visualize input data')
@@ -227,10 +234,12 @@ if __name__ == '__main__':
     #                     help='whether to train with crops or resized images')
 
     ############################################# I/0 parameters ######################################
-    parser.add_argument('-th', '--train_height', type=int, help='train height', default=352)
-    parser.add_argument('-tw', '--train_width', type=int, help='train width', default=528)
-    parser.add_argument('-vh', '--val_height', type=int, help='validate height', default=352)
-    parser.add_argument('-vw', '--val_width', type=int, help='validate width', default=528)
+    parser.add_argument('-th', '--train_height', type=int, help='train height', default=480)
+    parser.add_argument('-tw', '--train_width', type=int, help='train width', default=640)
+    # HW: mono-lfvr: 176x264 (D) | Srinivasan: 188 x 270 (D) | Li: 192x192 | ours: 256x192 (D) | Random: 352x528 (D) | SD 480p: 480x640
+    parser.add_argument('-vh', '--val_height', type=int, help='validate height', default=480)
+    parser.add_argument('-vw', '--val_width', type=int, help='validate width', default=640)
+
     parser.add_argument('--depth_input', default=False, action='store_true', 
                         help='whether to use depth as input to network')
     
@@ -246,7 +255,8 @@ if __name__ == '__main__':
     parser.add_argument('--num_layers', default= 3, type=int, help='number of layers in the tensor display')
     parser.add_argument('--angular', default= 7, type=int, help='number of angular views to output')
     parser.add_argument('-tdf', '--td_factor', default=1, type=int, help='disparity factor for layers')
-    parser.add_argument('--no_refinement', default=True, action='store_false')
+    # by default always use refinement network
+    parser.add_argument('--no_refinement', default=False, action='store_true', help='whether to use refinement network')
 
     args = parser.parse_args()
 
