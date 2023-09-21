@@ -121,10 +121,14 @@ class DataLoadPreprocess(Dataset):
             # print("image.shape: ", image.shape)
             lf = lf.reshape(X*Y, C, H, W)
             
-            disp_path = os.path.join(self.args.otherDS_disp_path, 
+            if "unimatch" in self.args.otherDS_disp_path:
+                disp_path = os.path.join(self.args.otherDS_disp_path, 
                                      self.args.dataset, 
-                                     "test_dp",  # change to test/train for DPT depth | test_dp for unimatch
-                                     f"left_lf-{lf_num}_disp.png") # change to lf-{lf_num}.png for DPT depth | for unimatch: left_lf-{lf_num}_disp.png
+                                     "test", 
+                                     f"left_lf-{lf_num}_disp.png")
+            else:
+                disp_path = os.path.join(self.args.otherDS_disp_path, self.args.dataset, "test", f"lf-{lf_num}.png")
+                                         
             disp = cv2.imread(disp_path, cv2.IMREAD_ANYDEPTH)
             disp = cv2.resize(disp, (self.width, self.height), interpolation=cv2.INTER_CUBIC) / 255.
             disp = np.expand_dims(disp, axis=0)

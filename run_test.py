@@ -67,7 +67,10 @@ class Tester():
         self.zp = args.zero_plane
 
         ####################################### Save test results ##############################################
-        self.save_path = os.path.join(args.results, "Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
+        if "DPT" in args.otherDS_disp_path:
+            self.save_path = os.path.join(args.results, "DPT_Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
+        else:
+            self.save_path = os.path.join(args.results, "Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
         os.makedirs(self.save_path, exist_ok=True)
         self.save_numpy = args.save_numpy
 
@@ -202,7 +205,7 @@ if __name__ == '__main__':
     parser.add_argument('--genDP_path', default='/data2/aryan/TAMULF/test_dp/', type=str, help='path to generated dual pixels') 
     
     # Change to DPT depth maps: /data/prasan/datasets/LF_datasets/DPT-depth/ | /data2/aryan/unimatch/dp_otherDS/
-    parser.add_argument('--otherDS_disp_path', default='/data2/aryan/unimatch/dp_otherDS/', type=str, help='path to other datasets disparity maps')
+    parser.add_argument('--otherDS_disp_path', default='/data/prasan/datasets/LF_datasets/DPT-depth/', type=str, help='path to other datasets disparity maps')
 
     
     parser.add_argument('--gpu_1', default=0, type=int, help='which gpu to use')
