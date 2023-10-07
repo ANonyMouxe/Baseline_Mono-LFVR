@@ -87,7 +87,7 @@ class UnetLF(nn.Module):
         self.adaptive_bins_layer = mViT(10, patch_size=16, dim_out=layers, embedding_dim=128)
 
 
-    def forward(self, x, prev_state, **kwargs):
+    def forward(self, x, prev_state=None, **kwargs):
         out = self.encoder(x)
         unet_out, state = self.decoder(out, prev_state, **kwargs)
 

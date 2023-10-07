@@ -126,10 +126,18 @@ class DataLoadPreprocess(Dataset):
                                      self.args.dataset, 
                                      "test", 
                                      f"left_lf-{lf_num}_disp.png")
-            else:
-                disp_path = os.path.join(self.args.otherDS_disp_path, self.args.dataset, "test", f"lf-{lf_num}.png")
-                                         
+                # print(disp_path)
+            else: # DPT
+                disp_path = os.path.join(self.args.otherDS_disp_path, self.args.dataset, "test", 
+                                         f"lf-{lf_num}.png")
+
+
+            # print(f"--------------------------")
+            # print(disp_path)
+            # print(f"--------------------------")              
+
             disp = cv2.imread(disp_path, cv2.IMREAD_ANYDEPTH)
+            # print(disp.shape)
             disp = cv2.resize(disp, (self.width, self.height), interpolation=cv2.INTER_CUBIC) / 255.
             disp = np.expand_dims(disp, axis=0)
             

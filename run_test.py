@@ -2,6 +2,7 @@
 import argparse
 import os
 import sys
+# sys.setrecursionlimit(20000)
 import uuid
 from datetime import datetime as dt
 import json
@@ -30,15 +31,22 @@ from vid_dataloader import LFDataLoader
 from loss import *
 from utils import RunningAverage, RunningAverageDict, denormalize
 import tensor_ops as utils
+from flopth import flopth
+from torchstat import stat
 
+import time
 
 class Tester():
     def __init__(self, args):
 
         self.args = args
         #################################### Setup GPU device ######################################### 
-        self.device = torch.device(f'cuda:{args.gpu_1}' if torch.cuda.is_available() else 'cpu')
-        self.device1 = torch.device(f'cuda:{args.gpu_2}' if torch.cuda.is_available() else 'cpu')
+        if args.val_height == 480:
+            self.device = torch.device('cpu')
+            self.device1 = torch.device('cpu')
+        else:
+            self.device = torch.device(f'cuda:{args.gpu_1}' if torch.cuda.is_available() else 'cpu')
+            self.device1 = torch.device(f'cuda:{args.gpu_2}' if torch.cuda.is_available() else 'cpu')
         print('Device: {}, {}'.format(self.device, self.device1))
         
         self.no_refinement = args.no_refinement
@@ -63,6 +71,28 @@ class Tester():
         ##################################### Tensor Display ##########################################
         self.val_td_model = models.multilayer(height=args.val_height, width=args.val_width, 
                                               args=self.args, device=self.device1)
+
+        if self.args.flops:
+            # flops1, params1 = flopth(self.model, 
+            #                        inputs=(torch.rand(1, 10, args.val_height, args.val_width),), 
+            #                        show_detail=True)
+                   
+            # print(flops1, params1)
+            stat(self.model, (10, args.val_height, args.val_width))
+            # print(flops2, params2)
+            exit()
+
+
+        if self.args.get_model_size:
+            print("Model:")
+            self.get_size_in_MB(self.model)
+            # self.get_size_in_MB(self.val_td_model)
+            if not self.args.no_refinement:
+                print("Refine mViT:")
+                self.get_size_in_MB(self.ref_model)
+            exit()
+
+
         self.md = args.max_displacement
         self.zp = args.zero_plane
 
@@ -70,10 +100,28 @@ class Tester():
         if "DPT" in args.otherDS_disp_path:
             self.save_path = os.path.join(args.results, "DPT_Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
         else:
-            self.save_path = os.path.join(args.results, "Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
+            self.save_path = os.path.join(args.results, "Uni_Ref_" + str(not args.no_refinement) + f"_{args.val_height}x{args.val_width}_" + args.dataset)
         os.makedirs(self.save_path, exist_ok=True)
         self.save_numpy = args.save_numpy
 
+
+
+    def get_size_in_MB(self, model):
+        param_size = 0
+        for param in model.parameters():
+            param_size += param.nelement() * param.element_size()
+        buffer_size = 0
+        for buffer in model.buffers():
+            buffer_size += buffer.nelement() * buffer.element_size()
+
+        size_all_mb = (param_size + buffer_size) / 1024**2
+
+        print('model size: {:.3f}MB'.format(size_all_mb))
+        total_params = int(sum(p.numel() for p in model.parameters()))
+        print("total_params:", total_params)
+
+        return size_all_mb, total_params
+    
 
     def calculate_psnr(self, img1, img2):
         # print(img1.shape, img2.shape)
@@ -106,6 +154,10 @@ class Tester():
             ssim_avg_1 = RunningAverage()
             f = open(os.path.join(self.save_path, f'results.txt'), 'w')
 
+        if self.args.calcTime:
+            f_time = open(os.path.join(self.save_path, f'results.txt'), 'w')
+            all_times = []
+
         with torch.no_grad():
             with tqdm(enumerate(test_loader), total=len(test_loader), desc=f"Testing {self.args.dataset}") as vepoch:
                 for i, batch in vepoch:
@@ -130,21 +182,53 @@ class Tester():
                         # orig_imgs.append(denormalize3d(curr_orig_image).cpu())
                         # prev_orig_image = batch[id-1]['rgb']
                         # next_orig_image = batch[id+1]['rgb']
-                        unimatch_disp =  batch[1]['disp'].to(self.device)
-                        disp = -1 * (unimatch_disp - zero_plane) * max_disp
+                        disp =  batch[1]['disp'].to(self.device)
+                        disp = -1 * (disp - zero_plane) * max_disp
                         # print(disp.shape)
                         img = torch.cat([prev_img, curr_img, next_img, disp], dim=1) 
-    
-                        decomposition, depth_planes, state = self.model(img, prev_state)
-                        pred_lf = self.val_td_model(decomposition, depth_planes).cpu()
-                        pred_lf.clip(0, 1)
+
+                        if self.args.calcTime:
+                            starttime = time.time()
+                            
+                            decomposition, depth_planes, state = self.model(img, prev_state)
+                            pred_lf = self.val_td_model(decomposition, depth_planes)
+                            
+                            if not self.args.no_refinement:
+                                lf_inp = torch.cat([pred_lf, curr_img.unsqueeze(1)], dim=1)
+                                mask, corr_lf = self.ref_model(lf_inp)
+                                ref_lf = mask*corr_lf + (1-mask)*pred_lf
+                                ref_lf = ref_lf.clip(0, 1)
+                                ref_lf = ref_lf.cpu()
+
+                            elapsed_time = time.time() - starttime
+                            
+                            all_times.append(elapsed_time)
+                            f_time.write(str(elapsed_time)+"\n")
+
+                            pred_lf = pred_lf.cpu()
+                            
+                        else:
+                            decomposition, depth_planes, state = self.model(img, prev_state)
+                            pred_lf = self.val_td_model(decomposition, depth_planes)
+
+                            if not self.args.no_refinement:
+                                lf_inp = torch.cat([pred_lf, curr_img.unsqueeze(1)], dim=1)
+                                mask, corr_lf = self.ref_model(lf_inp)
+                                ref_lf = mask*corr_lf + (1-mask)*pred_lf
+                                ref_lf = ref_lf.clip(0, 1).cpu()
+
+                        pred_lf = pred_lf.clip(0, 1).cpu()
                         # pred_lfs.append(pred_lf)
                         if self.args.calcMetrics:
                             # print(f"calculating metrics for {id}th image")
                             gt_lf = batch[1]['lf'].cpu()
                             # gt_lfs.append(gt_lf)
-                            pred_psnr_1 = self.calculate_psnr(pred_lf, gt_lf)
-                            pred_ssim_1 = self.calculate_ssim(pred_lf, gt_lf)
+                            if not self.args.no_refinement:
+                                pred_psnr_1 = self.calculate_psnr(ref_lf, gt_lf)
+                                pred_ssim_1 = self.calculate_ssim(ref_lf, gt_lf)
+                            else:
+                                pred_psnr_1 = self.calculate_psnr(pred_lf, gt_lf)
+                                pred_ssim_1 = self.calculate_ssim(pred_lf, gt_lf)
                             # print("psnr, ssim :: ", pred_psnr_1, pred_ssim_1)
                             psnr_avg_1.append(pred_psnr_1)
                             ssim_avg_1.append(pred_ssim_1)
@@ -165,6 +249,10 @@ class Tester():
                     f.write(string)
                     f.close()
 
+                if self.args.calcTime:
+                    avg_time = sum(all_times) / len(all_times)
+                    f_time.write("\n\nAvg Time: " + str(avg_time) + "\n")
+                    f_time.close()
                         
 
     def main_worker(self):        
@@ -204,12 +292,12 @@ if __name__ == '__main__':
                         help='whether to train with crops or resized images')
     parser.add_argument('--genDP_path', default='/data2/aryan/TAMULF/test_dp/', type=str, help='path to generated dual pixels') 
     
-    # Change to DPT depth maps: /data/prasan/datasets/LF_datasets/DPT-depth/ | /data2/aryan/unimatch/dp_otherDS/
-    parser.add_argument('--otherDS_disp_path', default='/data/prasan/datasets/LF_datasets/DPT-depth/', type=str, help='path to other datasets disparity maps')
+    # Change to DPT depth maps: /media/data/prasan/datasets/LF_datasets/DPT-depth | /data2/aryan/unimatch/dp_otherDS/
+    parser.add_argument('--otherDS_disp_path', default='/media/data/prasan/datasets/LF_datasets/DPT-depth/', type=str, help='path to other datasets disparity maps')
 
-    
-    parser.add_argument('--gpu_1', default=0, type=int, help='which gpu to use')
-    parser.add_argument('--gpu_2', default=0, type=int, help='which gpu to use')
+    parser.add_argument('--get_model_size', action='store_true', default=False)
+    parser.add_argument('--gpu_1', default=1, type=int, help='which gpu to use')
+    parser.add_argument('--gpu_2', default=1, type=int, help='which gpu to use')
     parser.add_argument('--workers', default=1, type=int, help='number of workers for data loading')
 
     ######################################## Dataset parameters #######################################
@@ -220,10 +308,9 @@ if __name__ == '__main__':
                         help='path to dataset')
     
     # Unimatch disparity maps ----------------------------------------------------------
-    # NOTE: Default: True
     parser.add_argument('--unimatch_disp_path', '-udp', default='/data2/aryan/lfvr/disparity_maps/disp_pixel4_BA', type=str,
                         help='path to disparity maps from unimatch')
-    parser.add_argument('--use_unimatch', '-uud', default=True, action='store_true')
+    parser.add_argument('--use_unimatch', '-uud', default=False, action='store_true')
     # -----------------------------------------------------------------------------------
 
     parser.add_argument('--filenames_file_folder',
@@ -243,7 +330,7 @@ if __name__ == '__main__':
     parser.add_argument('-vh', '--val_height', type=int, help='validate height', default=480)
     parser.add_argument('-vw', '--val_width', type=int, help='validate width', default=640)
 
-    parser.add_argument('--depth_input', default=False, action='store_true', 
+    parser.add_argument('--depth_input', default=True, action='store_true', 
                         help='whether to use depth as input to network')
     
     parser.add_argument('-md', '--max_displacement', default=1.2, type=float)
@@ -260,6 +347,8 @@ if __name__ == '__main__':
     parser.add_argument('-tdf', '--td_factor', default=1, type=int, help='disparity factor for layers')
     # by default always use refinement network
     parser.add_argument('--no_refinement', default=False, action='store_true', help='whether to use refinement network')
+    parser.add_argument('--calcTime', default=False, action='store_true')
+    parser.add_argument('--flops', default=False, action='store_true')
 
     args = parser.parse_args()
 

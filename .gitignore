@@ -5,4 +5,8 @@ __pycache__/
 *.npy
 test_inputs/
 weights/
-results/
+results*/
+net_timing/
+depth-timing/
+models/
+FT_train-test_files/
