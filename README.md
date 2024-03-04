@@ -1,9 +1,13 @@
-### (Baseline) Testing bench for Synthesizing-Light-Field-Video-from-Monocular-Video (our previous eccv 22 work)
+### (Baseline: Mono + Mono-R) Synthesizing-Light-Field-Video-from-Monocular-Video
 
-
-Results from this test bench are added to our paper: Light Field Video Reconstruction From Dual Pixels (LFVR-DP)    
-
-
-
-> Aryan Garg   
-> Project Associate, IIT Madras
+```
+@inproceedings{mono_govindarajan,
+      title={Synthesizing Light Field Video from Monocular Video},
+      author={Shrisudhan Govindarajan and Prasan Shedligeri and Sarah and Kaushik Mitra},
+      booktitle={Proceedings of European Conference for Computer Vision},
+      year={2022},
+      eprint={2207.10357},
+      archivePrefix={arXiv},
+      primaryClass={eess.IV}
+}
+```
