@@ -1,4 +1,6 @@
-### (Baseline: Mono + Mono-R) Synthesizing-Light-Field-Video-from-Monocular-Video
+# [ICCP 2024] Stereo-Knowledge Distillation from dpMV to Dual Pixels for Light Field Video Reconstruction    
+
+## (Baseline: Mono + Mono-R) Synthesizing-Light-Field-Video-from-Monocular-Video
 
 ```
 @inproceedings{mono_govindarajan,
